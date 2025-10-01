@@ -545,20 +545,195 @@ void tImageKTX::Clear()
 	{
 		for (int layer = 0; layer < NumMipmapLayers; layer++)
 		{
-			delete Layers[layer][image];
+			if (Layers[layer][image] != nullptr) {
+				delete Layers[layer][image];
+			}
 			Layers[layer][image] = nullptr;
 		}
+	}
+	if (PersistentTexture)
+	{
+		ktxTexture_Destroy(PersistentTexture);
+		PersistentTexture = nullptr;
 	}
 
 	States							= 0;	// Image will be invalid now since Valid state not set.
 	AlphaMode						= tAlphaMode::Unspecified;
 	ChannelType						= tChannelType::Unspecified;
 	IsCubeMap						= false;
+	IsArray							= false;
 	RowReversalOperationPerformed	= false;
 	NumImages						= 0;
+	NumArrayLayers					= 0;
 	NumMipmapLayers					= 0;
 
 	tBaseImage::Clear();
+}
+
+// On-demand array-layer+mip extraction & persistent texture support.
+bool tImageKTX::EnsurePersistentTexture() const
+{
+	if (PersistentTexture)
+		return true;
+	if (Filename.IsEmpty())
+		return false;
+	ktx_error_code_e r = ktxTexture_CreateFromNamedFile(Filename.Chr(), KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT, &PersistentTexture);
+	if (!PersistentTexture || r != KTX_SUCCESS)
+	{
+		if (PersistentTexture)
+		{
+			ktxTexture_Destroy(PersistentTexture);
+			PersistentTexture = nullptr;
+		}
+		return false;
+	}
+	return true;
+}
+
+bool tImageKTX::ExtractArrayLayerRGBA(int arrayLayer, int mipLevel, tPixel4b*& outPixels, int& outWidth, int& outHeight) const
+{
+	outPixels = nullptr; outWidth = outHeight = 0;
+	if (!IsTextureArray()) return false;
+	if ((arrayLayer < 0) || (arrayLayer >= NumArrayLayers)) return false;
+	if ((mipLevel < 0) || (mipLevel >= NumMipmapLayers)) return false;
+	if (IsCubemap()) return false; // Not yet.
+	if (Filename.IsEmpty()) return false;
+
+	// We may transcode KTX2 basis-universal payloads on-demand. Keep an effective format local.
+	tPixelFormat effFormat = PixelFormat;
+
+	if (!EnsurePersistentTexture()) return false;
+	ktxTexture* texture = PersistentTexture;
+	if (arrayLayer >= (int)texture->numLayers || mipLevel >= (int)texture->numLevels) return false;
+
+	// If KTX2 and needs transcoding, perform it now to a format we can easily read.
+	if (texture->classId == ktxTexture2_c)
+	{
+		ktxTexture2* tex2 = (ktxTexture2*)texture;
+		if (ktxTexture2_NeedsTranscoding(tex2))
+		{
+			// Prefer uncompressed RGBA32 for simplicity (lets us direct copy afterwards).
+			ktx_error_code_e tr = ktxTexture2_TranscodeBasis(tex2, KTX_TTF_RGBA32, KTX_TF_HIGH_QUALITY);
+			if (tr == KTX_SUCCESS)
+				effFormat = tPixelFormat::R8G8B8A8;
+		}
+	}
+
+	int width  = tMath::tMax(1, int(texture->baseWidth  >> mipLevel));
+	int height = tMath::tMax(1, int(texture->baseHeight >> mipLevel));
+	outWidth = width; outHeight = height;
+
+	ktx_error_code_e r = KTX_SUCCESS; size_t offset = 0;
+	r = ktxTexture_GetImageOffset(texture, mipLevel, arrayLayer, 0, &offset);
+	if (r != KTX_SUCCESS) return false;
+
+	int numPixels = width * height;
+	outPixels = new tPixel4b[numPixels];
+	uint8* rawData = ktxTexture_GetData(texture) + offset;
+
+	// If effective format is plain RGBA8 we can copy directly even if Layers[0][0] is null (on-demand path).
+	if (effFormat == tPixelFormat::R8G8B8A8)
+	{
+		if (RowsReversed())
+		{
+			for (int y = 0; y < height; y++)
+			{
+				const uint8* srcRow = rawData + (height - 1 - y)*width*4;
+				tStd::tMemcpy(outPixels + y*width, srcRow, width*4);
+			}
+		}
+		else
+		{
+			tStd::tMemcpy(outPixels, rawData, numPixels*4);
+		}
+		return true;
+	}
+
+	// Otherwise we need to decode from a compressed/packed format into RGBA8.
+	// Compute source size for this slice.
+	int srcSize = 0;
+	if (tImage::tIsBCFormat(effFormat) || tImage::tIsASTCFormat(effFormat) || tImage::tIsPVRFormat(effFormat) || tImage::tIsPackedFormat(effFormat))
+	{
+		int blockW = tGetBlockWidth(effFormat);
+		int blockH = tGetBlockHeight(effFormat);
+		int bytesPerBlock = tImage::tGetBytesPerBlock(effFormat);
+		if (tImage::tIsPackedFormat(effFormat))
+		{
+			// For packed formats block size is per pixel (block dims 1x1).
+			srcSize = width * height * bytesPerBlock;
+		}
+		else
+		{
+			int numBlocksW = tGetNumBlocks(blockW, width);
+			int numBlocksH = tGetNumBlocks(blockH, height);
+			srcSize = numBlocksW * numBlocksH * bytesPerBlock;
+		}
+	}
+	else
+	{
+		// Unsupported format path. Fill placeholder colours.
+		tPixel4b c;
+		switch (arrayLayer % 8)
+		{
+			case 0: c = tPixel4b(255,0,0,255); break; case 1: c = tPixel4b(0,255,0,255); break; case 2: c = tPixel4b(0,0,255,255); break;
+			case 3: c = tPixel4b(255,255,0,255); break; case 4: c = tPixel4b(255,0,255,255); break; case 5: c = tPixel4b(0,255,255,255); break;
+			case 6: c = tPixel4b(255,128,0,255); break; default: c = tPixel4b(128,0,255,255); break;
+		}
+		for (int i = 0; i < numPixels; i++) outPixels[i] = c;
+		return true;
+	}
+
+	tColour4b* decoded4b = nullptr; tColour4f* decoded4f = nullptr;
+	tImage::DecodeResult dres = tImage::DecodePixelData(effFormat, rawData, srcSize, width, height, decoded4b, decoded4f, ColourProfileSrc);
+	if (dres != tImage::DecodeResult::Success)
+	{
+		// Failed. Placeholder fill.
+		tPixel4b c;
+		switch (arrayLayer % 8)
+		{
+			case 0: c = tPixel4b(255,0,0,255); break; case 1: c = tPixel4b(0,255,0,255); break; case 2: c = tPixel4b(0,0,255,255); break;
+			case 3: c = tPixel4b(255,255,0,255); break; case 4: c = tPixel4b(255,0,255,255); break; case 5: c = tPixel4b(0,255,255,255); break;
+			case 6: c = tPixel4b(255,128,0,255); break; default: c = tPixel4b(128,0,255,255); break;
+		}
+		for (int i = 0; i < numPixels; i++) outPixels[i] = c;
+		return true;
+	}
+
+	// Ensure we have 4b output.
+	if (decoded4f && !decoded4b)
+	{
+		decoded4b = new tColour4b[numPixels];
+		for (int p = 0; p < numPixels; p++)
+			decoded4b[p].Set(decoded4f[p]);
+		delete[] decoded4f; decoded4f = nullptr;
+	}
+
+	// Copy (and apply row reversal if needed) into outPixels.
+	if (decoded4b)
+	{
+		if (RowsReversed())
+		{
+			for (int y = 0; y < height; y++)
+			{
+				const tColour4b* srcRow = decoded4b + (height - 1 - y)*width;
+				tStd::tMemcpy(outPixels + y*width, srcRow, width*4);
+			}
+		}
+		else
+		{
+			tStd::tMemcpy(outPixels, decoded4b, numPixels*4);
+		}
+		delete[] decoded4b; decoded4b = nullptr;
+		return true;
+	}
+
+	// Should not get here.
+	return false;
+}
+
+bool tImageKTX::ExtractArrayLayerBaseRGBA(int arrayLayer, tPixel4b*& outPixels, int& outWidth, int& outHeight) const
+{
+	return ExtractArrayLayerRGBA(arrayLayer, 0, outPixels, outWidth, outHeight);
 }
 
 
@@ -799,13 +974,21 @@ bool tImageKTX::LoadFromTexture(ktxTexture* texture, const LoadParams& paramsIn)
 	ktx_error_code_e result = KTX_SUCCESS;
 
 	NumImages			= texture->numFaces;		// Number of faces. 1 or 6 for cubemaps.
-	int numLayers		= texture->numLayers;		// Number of array layers. I believe this will be > 1 for 3D textures that are made of an array of layers.
+	NumArrayLayers		= texture->numLayers;		// Number of array layers. I believe this will be > 1 for 3D textures that are made of an array of layers.
 	NumMipmapLayers		= texture->numLevels;		// Mipmap levels.
 	int numDims			= texture->numDimensions;	// 1D, 2D, or 3D.
 	int mainWidth		= texture->baseWidth;
 	int mainHeight		= texture->baseHeight;
-	bool isArray		= texture->isArray;
+	IsArray				= texture->isArray;
 	bool isCompressed	= texture->isCompressed;
+	
+	// Debug output
+	printf("KTX Debug: Loading %s\n", Filename.Chr());
+	printf("  Faces: %d, ArrayLayers: %d, MipmapLevels: %d\n", NumImages, NumArrayLayers, NumMipmapLayers);
+	printf("  Dimensions: %dx%d, IsArray: %s\n", mainWidth, mainHeight, IsArray ? "Yes" : "No");
+	printf("  IsTextureArray: %s, IsVolume3D: %s\n", 
+		IsTextureArray() ? "Yes" : "No", 
+		IsVolume3D() ? "Yes" : "No");
 
 	if ((NumMipmapLayers <= 0) || (numDims != 2) || (mainWidth <= 0) || (mainHeight <= 0))
 	{
@@ -1164,6 +1347,8 @@ const char* tImageKTX::StateDescriptions[] =
 };
 tStaticAssert(tNumElements(tImageKTX::StateDescriptions) == int(tImageKTX::StateBit::NumStateBits));
 tStaticAssert(int(tImageKTX::StateBit::NumStateBits) <= int(tImageKTX::StateBit::MaxStateBits));
+
+
 
 
 }

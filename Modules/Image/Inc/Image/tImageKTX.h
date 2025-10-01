@@ -169,12 +169,15 @@ public:
 
 	bool IsMipmapped() const override																					{ return (NumMipmapLayers > 1) ? true : false; }
 	bool IsCubemap() const override																						{ return IsCubeMap; }
+	bool IsTextureArray() const																							{ return IsArray && (NumArrayLayers > 1); }
+	bool IsVolume3D() const																							{ return !IsArray && (NumArrayLayers > 1); }
 	bool RowsReversed() const																							{ return RowReversalOperationPerformed; }
 
 	// The number of mipmap levels per image is always the same if there is more than one image in the direct texture
 	// (like for cube maps). Same for the dimensions and pixel format.
 	int GetNumMipmapLevels() const																						{ return NumMipmapLayers; }
 	int GetNumImages() const																							{ return NumImages; }
+	int GetNumArrayLayers() const																						{ return NumArrayLayers; }
 	int GetWidth() const																								{ return IsValid() ? Layers[0][0]->Width : 0; }
 	int GetHeight() const																								{ return IsValid() ? Layers[0][0]->Height : 0; }
 
@@ -209,12 +212,33 @@ public:
 
 	// You do not own the returned pointer.
 	tLayer* GetLayer(int layerNum, int imageNum) const																	{ return Layers[layerNum][imageNum]; }
+	
+	// Get frames for texture array layers. This creates tFrame objects for each array layer.
+	// If the KTX is not a texture array, returns false and leaves frames unmodified.
+	// This function requires the KTX file to be loaded again to access individual array layers.
+	bool GetArrayLayerFrames(tList<tFrame>& frames, const LoadParams& params = LoadParams()) const;
+
+	// Extracts a single base-mip RGBA layer for a texture-array entry. Returns true on success.
+	// Allocates a new pixel buffer (RGBA8) that the caller owns and must delete[] if stealPixels is false in Set().
+	// If the underlying format is not directly RGBA8, a solid placeholder colour is generated.
+	bool ExtractArrayLayerBaseRGBA(int arrayLayer, tPixel4b*& outPixels, int& outWidth, int& outHeight) const;
+
+	// Generalized extraction that supports any mip level. Currently only supports direct copy for source files
+	// whose stored format is R8G8B8A8. For other formats (compressed, packed, etc) a solid placeholder colour is
+	// generated (same scheme as base extractor). Returns true on success (including placeholder generation).
+	// If rows were reversed in the originally loaded image, the returned pixel rows are reversed to match.
+	bool ExtractArrayLayerRGBA(int arrayLayer, int mipLevel, tPixel4b*& outPixels, int& outWidth, int& outHeight) const;
+	
 	tAlphaMode GetAlphaMode() const override																			{ return AlphaMode; }
 	tString Filename;
 
 private:
 	bool LoadFromTexture(ktxTexture* texture, const LoadParams& paramsIn);
 	void SetStateBit(StateBit state)		{ States |= 1 << int(state); }
+
+	// Persistent libktx texture for on-demand slice extraction to avoid reopening file repeatedly.
+	mutable ktxTexture* PersistentTexture = nullptr; // Owned if non-null.
+	bool EnsurePersistentTexture() const; // Opens file if needed.
 
 	// The states are bits in this States member.
 	uint32 States							= 0;
@@ -223,10 +247,14 @@ private:
 	tChannelType ChannelType				= tChannelType::Unspecified;
 
 	bool IsCubeMap							= false;
+	bool IsArray							= false;
 	bool RowReversalOperationPerformed		= false;
 
 	// This will be 1 for textures and 6 for cubemaps.
 	int NumImages							= 0;
+	
+	// Number of array layers. 1 for regular textures, >1 for texture arrays or 3D volumes.
+	int NumArrayLayers						= 0;
 
 	// If this is 1, you can consider the texture(s) to NOT be mipmapped. If there is more than a single image (like
 	// with a cubemap), all images have the same number of mipmap layers.
