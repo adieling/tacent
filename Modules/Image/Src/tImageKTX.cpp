@@ -599,8 +599,11 @@ bool tImageKTX::ExtractArrayLayerRGBA(int arrayLayer, int mipLevel, tPixel4b*& o
 	if (IsCubemap()) return false; // Not yet.
 	if (Filename.IsEmpty()) return false;
 
-	// We may transcode KTX2 basis-universal payloads on-demand. Keep an effective format local.
-	tPixelFormat effFormat = PixelFormat;
+	// We must use the original source pixel format here. PixelFormat may have been changed to R8G8B8A8
+	// after a full decode path (LoadFlag_Decode) which would make compressed slices look like
+	// interlaced garbage if we treat the still-compressed persistent texture bytes as raw RGBA.
+	// So start with PixelFormatSrc. If we transcode on-demand below we will override effFormat.
+	tPixelFormat effFormat = PixelFormatSrc;
 
 	if (!EnsurePersistentTexture()) return false;
 	ktxTexture* texture = PersistentTexture;
