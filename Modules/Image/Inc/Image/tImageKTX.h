@@ -215,8 +215,7 @@ public:
 	
 	// Get frames for texture array layers. This creates tFrame objects for each array layer.
 	// If the KTX is not a texture array, returns false and leaves frames unmodified.
-	// This function requires the KTX file to be loaded again to access individual array layers.
-	bool GetArrayLayerFrames(tList<tFrame>& frames, const LoadParams& params = LoadParams()) const;
+	// (Removed unused GetArrayLayerFrames implementation to minimize vendored diff.)
 
 	// Extracts a single base-mip RGBA layer for a texture-array entry. Returns true on success.
 	// Allocates a new pixel buffer (RGBA8) that the caller owns and must delete[] if stealPixels is false in Set().

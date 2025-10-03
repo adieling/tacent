@@ -985,13 +985,7 @@ bool tImageKTX::LoadFromTexture(ktxTexture* texture, const LoadParams& paramsIn)
 	IsArray				= texture->isArray;
 	bool isCompressed	= texture->isCompressed;
 	
-	// Debug output
-	printf("KTX Debug: Loading %s\n", Filename.Chr());
-	printf("  Faces: %d, ArrayLayers: %d, MipmapLevels: %d\n", NumImages, NumArrayLayers, NumMipmapLayers);
-	printf("  Dimensions: %dx%d, IsArray: %s\n", mainWidth, mainHeight, IsArray ? "Yes" : "No");
-	printf("  IsTextureArray: %s, IsVolume3D: %s\n", 
-		IsTextureArray() ? "Yes" : "No", 
-		IsVolume3D() ? "Yes" : "No");
+	// (Debug prints removed during cleanup. Consider adding a verbose flag if needed.)
 
 	if ((NumMipmapLayers <= 0) || (numDims != 2) || (mainWidth <= 0) || (mainHeight <= 0))
 	{
